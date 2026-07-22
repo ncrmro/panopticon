@@ -105,6 +105,21 @@ def test_spawn_manifest_targets_the_agent_namespace_sa_secret_and_workspace() ->
     assert env["PANOPTICON_STARTING_MODEL"] == "opus"
 
 
+def test_image_pull_policy_defaults_to_if_not_present_for_locally_imported_images() -> None:
+    rec = _Recorder()
+    _runner(rec).spawn("t1")  # default policy
+    container = json.loads(rec.calls[1][2])["spec"]["template"]["spec"]["containers"][0]
+    # IfNotPresent so a `k3s ctr import` / `kind load` image is used as-is (Always would try to pull)
+    assert container["imagePullPolicy"] == "IfNotPresent"
+
+
+def test_image_pull_policy_is_configurable() -> None:
+    rec = _Recorder()
+    KubernetesRunner("http://svc:8000", agent="a", image_pull_policy="Always", run=rec).spawn("t1")
+    container = json.loads(rec.calls[1][2])["spec"]["template"]["spec"]["containers"][0]
+    assert container["imagePullPolicy"] == "Always"  # registry-backed image
+
+
 def test_spawn_reports_starting_then_awaiting_via_the_progress_callback() -> None:
     phases: list[LifecyclePhase] = []
     _runner(_Recorder()).spawn("t1", progress=phases.append)

@@ -81,6 +81,7 @@ class KubernetesRunner(Runner):
         namespace: str | None = None,
         runner_id: str = "kubernetes",
         image: str = DEFAULT_IMAGE,
+        image_pull_policy: str = "IfNotPresent",
         credentials_secret: str | None = None,
         service_account: str = DEFAULT_SERVICE_ACCOUNT,
         kubectl: Sequence[str] = ("kubectl",),
@@ -97,6 +98,11 @@ class KubernetesRunner(Runner):
         self._namespace = namespace or f"agent-{agent}"
         self._runner_id = runner_id
         self._image = image
+        #: ``imagePullPolicy`` for the pod. Defaults to ``IfNotPresent`` so a **locally-imported**
+        #: image (``k3s ctr images import`` / ``kind load`` — the microVM dev path) is used as-is
+        #: instead of pulled: a ``:latest`` tag otherwise defaults to ``Always`` and fails on a
+        #: cluster with no registry for it. Set ``Always`` for a real registry-backed image.
+        self._image_pull_policy = image_pull_policy
         #: The in-namespace Secret carrying the container's credentials (OPR-004): projected as
         #: ``envFrom`` so it reaches the agent (``CLAUDE_CODE_OAUTH_TOKEN`` etc.). ``None`` = the
         #: agent's own env already carries auth (link-operator projected it onto the namespace).
@@ -134,6 +140,7 @@ class KubernetesRunner(Runner):
         container: dict[str, Any] = {
             "name": "agent",
             "image": image,
+            "imagePullPolicy": self._image_pull_policy,
             "command": list(self._pod_command),
             "env": [{"name": k, "value": v} for k, v in env.items()],
             "volumeMounts": [{"name": "workspace", "mountPath": "/workspace"}],

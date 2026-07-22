@@ -256,6 +256,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="the panopticon task image the pod runs (reachable in-cluster)",
     )
     parser.add_argument(
+        "--k8s-image-pull-policy",
+        default=os.environ.get("PANOPTICON_K8S_IMAGE_PULL_POLICY", "IfNotPresent"),
+        help="pod imagePullPolicy (default IfNotPresent — use a locally-imported image as-is; set "
+        "Always for a registry-backed image)",
+    )
+    parser.add_argument(
         "--k8s-credentials-secret",
         default=os.environ.get("PANOPTICON_K8S_CREDENTIALS_SECRET", ""),
         help="in-namespace Secret projected as envFrom for the pod's credentials (OPR-004)",
@@ -278,21 +284,23 @@ def build_runner(args: argparse.Namespace) -> ContainerRunner:
     """Construct the execution backend selected by ``--runner-type`` (split from :func:`main` so
     tests can assert the selection without running the endless loop).
 
-    ``kubernetes`` spawns task Jobs into a pre-declared link-operator ``agent-<name>`` namespace
-    (RFC #347) and points containers at ``--service-url`` (the pod reaches the task service over
-    in-cluster DNS, not the Docker ``host.docker.internal`` bridge); ``local`` is the Docker+tmux
-    runner pointed at ``--container-service-url``."""
+    Both backends point task containers at ``--container-service-url`` — the **in-container callback
+    view**, distinct from the daemon's own ``--service-url``. For ``kubernetes`` that's the task
+    service's in-cluster DNS (e.g. ``http://panopticon.<ns>.svc:8000``); the daemon itself still
+    reaches the service at ``--service-url`` (host-reachable, e.g. a port-forward). For ``local``
+    it's the Docker ``host.docker.internal`` bridge."""
     if args.runner_type == "kubernetes":
         if not args.k8s_agent:
             raise SystemExit(
                 "--runner-type=kubernetes requires --k8s-agent (or PANOPTICON_K8S_AGENT)"
             )
         return KubernetesRunner(
-            args.service_url,
+            args.container_service_url,  # the pod's in-cluster callback URL (not the daemon's view)
             agent=args.k8s_agent,
             namespace=args.k8s_namespace or None,
             runner_id=args.runner_id,
             image=args.k8s_image,
+            image_pull_policy=args.k8s_image_pull_policy,
             credentials_secret=args.k8s_credentials_secret or None,
             context=args.k8s_context or None,
         )
