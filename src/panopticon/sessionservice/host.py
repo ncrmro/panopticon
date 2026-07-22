@@ -39,8 +39,10 @@ from panopticon.sessionservice._migration import migrate_session_dirs
 from panopticon.sessionservice.clones import CloneCache
 from panopticon.sessionservice.executions import WorkflowExecutions
 from panopticon.sessionservice.images import ImageBuilder
+from panopticon.sessionservice.kubernetes_runner import KubernetesRunner
 from panopticon.sessionservice.local_runner import DEFAULT_IMAGE, LocalRunner
 from panopticon.sessionservice.provisioner import Provisioner
+from panopticon.sessionservice.runner import ContainerRunner
 from panopticon.sessionservice.shell_runner import ShellRunner
 from panopticon.sessionservice.spawner import Spawner
 
@@ -54,7 +56,7 @@ class HostDaemon:
         self,
         client: TaskServiceClient,
         spawner: Spawner,
-        provisioner: Provisioner,
+        provisioner: Provisioner | None,
         *,
         sleep: Callable[[float], None] = time.sleep,
         interval: float = 2.0,
@@ -84,7 +86,8 @@ class HostDaemon:
         for task in tasks:
             try:
                 self._spawner.spawn_one(task)
-                self._provisioner.provision(task)
+                if self._provisioner is not None:  # None for remote backends (provisioning is
+                    self._provisioner.provision(task)  # in-container — e.g. the Kubernetes runner)
                 self._spawner.reconcile(task)
                 self._spawner.heal(task)
                 self._spawner.cleanup(task)
@@ -163,7 +166,7 @@ def hold_runner_liveness(
 
 def run_host(
     client: TaskServiceClient,
-    runner: LocalRunner,
+    runner: ContainerRunner,
     *,
     runner_id: str,
     tasks_root: str,
@@ -176,7 +179,12 @@ def run_host(
     until: Callable[[], bool] | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
-    """Wire the spawner + provisioner over a shared per-task-clone root and run the host loop."""
+    """Wire the spawner (+ host provisioner when the backend needs it) over a shared per-task-clone
+    root and run the host loop.
+
+    A backend that prepares its own workspace (``runner.host_prepared`` is ``False`` — the
+    Kubernetes runner) provisions **in-container**, so no host-side :class:`Provisioner` is wired
+    for it; the local Docker runner keeps the host-side branch-the-clone provisioner (ADR 0011)."""
     executions = WorkflowExecutions(client)  # one shared "how is this workflow run" cache for both
     spawner = Spawner(
         client,
@@ -190,7 +198,11 @@ def run_host(
         images=images,
         makedirs=makedirs,
     )
-    provisioner = Provisioner(client, clones_root=tasks_root, git=git, executions=executions)
+    provisioner = (
+        Provisioner(client, clones_root=tasks_root, git=git, executions=executions)
+        if runner.host_prepared
+        else None
+    )
     HostDaemon(client, spawner, provisioner, interval=interval, sleep=sleep).run(until=until)
 
 
@@ -221,12 +233,70 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--image", default=DEFAULT_IMAGE)
     parser.add_argument(
+        "--runner-type",
+        choices=("local", "kubernetes"),
+        default=os.environ.get("PANOPTICON_RUNNER_TYPE", "local"),
+        help="execution backend: local Docker+tmux (default) or Kubernetes Jobs over a "
+        "link-operator agent namespace (RFC #347)",
+    )
+    parser.add_argument(
+        "--k8s-agent",
+        default=os.environ.get("PANOPTICON_K8S_AGENT", ""),
+        help="link-operator Agent name; task Jobs run in its `agent-<name>` namespace "
+        "(required for --runner-type=kubernetes)",
+    )
+    parser.add_argument(
+        "--k8s-namespace",
+        default=os.environ.get("PANOPTICON_K8S_NAMESPACE", ""),
+        help="override the target namespace (default `agent-<k8s-agent>`)",
+    )
+    parser.add_argument(
+        "--k8s-image",
+        default=os.environ.get("PANOPTICON_K8S_IMAGE", DEFAULT_IMAGE),
+        help="the panopticon task image the pod runs (reachable in-cluster)",
+    )
+    parser.add_argument(
+        "--k8s-credentials-secret",
+        default=os.environ.get("PANOPTICON_K8S_CREDENTIALS_SECRET", ""),
+        help="in-namespace Secret projected as envFrom for the pod's credentials (OPR-004)",
+    )
+    parser.add_argument(
+        "--k8s-context",
+        default=os.environ.get("PANOPTICON_K8S_CONTEXT", ""),
+        help="kubectl context to target (default: the current context)",
+    )
+    parser.add_argument(
         "--interval",
         type=float,
         default=2.0,
         help="change-feed long-poll wait, seconds (the keepalive ceiling between blocking calls)",
     )
     return parser
+
+
+def build_runner(args: argparse.Namespace) -> ContainerRunner:
+    """Construct the execution backend selected by ``--runner-type`` (split from :func:`main` so
+    tests can assert the selection without running the endless loop).
+
+    ``kubernetes`` spawns task Jobs into a pre-declared link-operator ``agent-<name>`` namespace
+    (RFC #347) and points containers at ``--service-url`` (the pod reaches the task service over
+    in-cluster DNS, not the Docker ``host.docker.internal`` bridge); ``local`` is the Docker+tmux
+    runner pointed at ``--container-service-url``."""
+    if args.runner_type == "kubernetes":
+        if not args.k8s_agent:
+            raise SystemExit(
+                "--runner-type=kubernetes requires --k8s-agent (or PANOPTICON_K8S_AGENT)"
+            )
+        return KubernetesRunner(
+            args.service_url,
+            agent=args.k8s_agent,
+            namespace=args.k8s_namespace or None,
+            runner_id=args.runner_id,
+            image=args.k8s_image,
+            credentials_secret=args.k8s_credentials_secret or None,
+            context=args.k8s_context or None,
+        )
+    return LocalRunner(args.container_service_url, image=args.image, runner_id=args.runner_id)
 
 
 def main(
@@ -238,7 +308,7 @@ def main(
     )
     migrate_session_dirs(CLONE_CACHE_DIR, TASKS_DIR)
     client = client or TaskServiceClient(httpx.Client(base_url=args.service_url))
-    runner = LocalRunner(args.container_service_url, image=args.image, runner_id=args.runner_id)
+    runner = build_runner(args)
     # A shell workflow runs directly on the host (no container), so it reaches the task service at
     # the host's own view (--service-url), not the in-container host.docker.internal address.
     shell_runner = ShellRunner(args.service_url, runner_id=args.runner_id)

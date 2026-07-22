@@ -19,9 +19,12 @@ from panopticon.sessionservice.clones import CloneCache
 from panopticon.sessionservice.host import (
     HostDaemon,
     build_arg_parser,
+    build_runner,
     hold_runner_liveness,
     run_host,
 )
+from panopticon.sessionservice.kubernetes_runner import KubernetesRunner
+from panopticon.sessionservice.local_runner import LocalRunner
 from panopticon.taskservice.api import create_app
 from panopticon.taskservice.artifacts_fs import FilesystemArtifactStore
 from panopticon.taskservice.service import TaskService
@@ -34,6 +37,8 @@ def _no_op_run(args: object, *, check: bool = True) -> str:
 
 
 class _FakeRunner:
+    host_prepared = True
+
     def __init__(self) -> None:
         self.spawned: list[str] = []
 
@@ -49,6 +54,7 @@ class _FakeRunner:
         initial_prompt: str | None = None,
         turn: str | None = None,
         starting_model: str | None = None,
+        git_url: str | None = None,
         progress: object = None,
     ) -> str:
         self.spawned.append(task_id)
@@ -382,6 +388,70 @@ def test_build_arg_parser_host_flag_overrides_env(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("PANOPTICON_RUNNER_HOST", "box.example.com")
     args = build_arg_parser().parse_args(["--host", "other.example.com"])
     assert args.host == "other.example.com"
+
+
+def test_build_runner_defaults_to_the_local_docker_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PANOPTICON_RUNNER_TYPE", raising=False)
+    args = build_arg_parser().parse_args([])
+    runner = build_runner(args)
+    assert isinstance(runner, LocalRunner)
+    assert runner.host_prepared is True  # the local path preps workspace + image host-side
+
+
+def test_build_runner_selects_the_kubernetes_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PANOPTICON_RUNNER_TYPE", raising=False)
+    args = build_arg_parser().parse_args(
+        ["--runner-type", "kubernetes", "--k8s-agent", "researcher"]
+    )
+    runner = build_runner(args)
+    assert isinstance(runner, KubernetesRunner)
+    assert runner.host_prepared is False  # provisioning + workspace move in-container
+
+
+def test_build_runner_kubernetes_requires_an_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PANOPTICON_RUNNER_TYPE", raising=False)
+    monkeypatch.delenv("PANOPTICON_K8S_AGENT", raising=False)
+    args = build_arg_parser().parse_args(["--runner-type", "kubernetes"])
+    with pytest.raises(SystemExit):
+        build_runner(args)
+
+
+def test_run_host_skips_the_host_provisioner_for_a_remote_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A remote backend provisions in-container, so run_host must wire no host-side Provisioner
+    # (branching a host clone that doesn't exist would error every pass). Capture what run_host
+    # hands the daemon and assert the provisioner is None for a `host_prepared = False` runner.
+    class _Remote(_FakeRunner):
+        host_prepared = False
+
+    captured: dict[str, object] = {}
+    real_init = HostDaemon.__init__
+
+    def _spy_init(
+        self: HostDaemon, client: object, spawner: object, provisioner: object, **kw: object
+    ) -> None:
+        captured["provisioner"] = provisioner
+        real_init(self, client, spawner, provisioner, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(HostDaemon, "__init__", _spy_init)
+    run_host(
+        _FakeClient([]),  # type: ignore[arg-type]
+        _Remote(),  # type: ignore[arg-type]
+        runner_id="k8s-1",
+        tasks_root="/tasks",
+        cache=CloneCache(
+            "/cache",
+            run=lambda *a, **k: "",  # type: ignore[arg-type]
+            exists=lambda _p: True,
+            makedirs=lambda _p: None,
+        ),
+        git=GitClones(run=lambda *a, **k: ""),  # type: ignore[arg-type]
+        until=lambda: True,  # the run loop stops before its first pass
+    )
+    assert captured["provisioner"] is None  # no host-side provisioning for the remote backend
 
 
 def test_run_host_spawns_then_provisions_end_to_end(tmp_path: Path) -> None:

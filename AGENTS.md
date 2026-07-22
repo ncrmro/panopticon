@@ -33,8 +33,14 @@ src/panopticon/
   taskservice/     # control plane: TaskService, FastAPI REST API, the SQLAlchemy store
                    # adapter (in-memory or on-disk SQLite), filesystem artifact store, MCP
                    # server (mcp.py: operations=tools, artifacts=resources; FastMCP) mounted at /mcp
-  sessionservice/  # the runner: Runner ABC + StubRunner (in-process) + LocalRunner
-                   # (real Docker+tmux via the CLIs) + ShellRunner (shell_runner.py = a workflow's
+  sessionservice/  # the runner: Runner ABC + the ContainerRunner protocol (runner.py = the wider
+                   # spawn/stop/is_running/has_session surface the spawn loop drives; `host_prepared`
+                   # picks host- vs in-unit workspace prep) + StubRunner (in-process) + LocalRunner
+                   # (real Docker+tmux via the CLIs) + KubernetesRunner (kubernetes_runner.py = ADR
+                   # 0014: spawn each task as a `batch/v1` Job in a pre-declared link-operator
+                   # `agent-<name>` namespace via `kubectl`; JSON manifests, host_prepared=False so
+                   # the pod preps its own workspace + provisions in-container) + ShellRunner
+                   # (shell_runner.py = a workflow's
                    # shell_script in a host tmux session, no container — for `runner_type="shell"`
                    # workflows; the spawner routes on it, skipping the image + the clone unless the
                    # workflow opts in via clone_repo); images.py = ADR-0005 composed images
@@ -52,7 +58,11 @@ src/panopticon/
   container/       # entrypoint (`python -m panopticon.container` = connect/register/slug/
                    # heartbeat liveness) + agent.py (`-m panopticon.container.agent` = the tmux
                    # pane's launcher: render skills + operations, point claude at the /mcp server,
-                   # put the workflow overview in its system prompt → exec `claude`) — the ONLY LLM pkg
+                   # put the workflow overview in its system prompt → exec `claude`) + pod.py
+                   # (`-m panopticon.container.pod` = the Kubernetes in-pod bootstrap, ADR 0014:
+                   # clone /workspace, run the agent in a tmux session, provision in-container, hold
+                   # liveness — the KubernetesRunner's single-pod counterpart to the local runner's
+                   # docker-run + tmux-exec split) — the ONLY LLM pkg
 docker/Dockerfile  # base task-container image (ADR 0005 base layer): python + git + bash +
                    # the panopticon package + the `claude` CLI the agent execs; runs as the
                    # unprivileged `panopticon` user. docker/entrypoint.sh = remap that user to the

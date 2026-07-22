@@ -100,6 +100,11 @@ def _invoking_user() -> str:
 class LocalRunner(Runner):
     """Runs task containers + host tmux on the local Docker daemon (one host)."""
 
+    #: The host readies the workspace (``git clone --local`` at ``/workspace``) and composes the
+    #: image before spawning, so the spawner runs its full prepare→build path (see
+    #: :class:`~panopticon.sessionservice.runner.ContainerRunner`).
+    host_prepared = True
+
     def __init__(
         self,
         service_url: str,
@@ -145,6 +150,7 @@ class LocalRunner(Runner):
         initial_prompt: str | None = None,
         turn: str | None = None,
         starting_model: str | None = None,
+        git_url: str | None = None,
         progress: Callable[[LifecyclePhase], None] | None = None,
     ) -> str:
         """Spawn the task container. ``env_file`` is the task's repo's secret reference (ADR
@@ -163,7 +169,10 @@ class LocalRunner(Runner):
         agent launcher can send :data:`~panopticon.container.agent.INTERRUPT_PROMPT` on respawn when
         the agent holds the turn. ``starting_model`` is the model the agent should start with
         (e.g. ``"opus"``); passed as ``PANOPTICON_STARTING_MODEL`` so the agent launcher can pass
-        ``--model`` to ``claude`` on first launch. ``progress`` (optional) is called with each spawn
+        ``--model`` to ``claude`` on first launch. ``git_url`` is accepted for parity with the
+        :class:`~panopticon.sessionservice.runner.ContainerRunner` protocol (a Kubernetes pod clones
+        its own checkout from it) but ignored here — the host already prepared ``workspace``.
+        ``progress`` (optional) is called with each spawn
         phase the runner passes through (``STARTING`` before ``docker run``, ``AWAITING`` once the
         tmux session is up) so the caller can surface it — see
         :class:`~panopticon.core.models.LifecyclePhase`."""
