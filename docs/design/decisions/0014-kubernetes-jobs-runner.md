@@ -98,6 +98,22 @@ routing yet (deferred — RFC #347): a host runs one backend.
 - Deferred (RFC #347): per-task **placement** routing; panopticon emitting the `Agent` CR (kept
   pre-declared, out of band).
 
+## Convergence on a shared "Agent Job" (RFC 0001)
+
+The raw Job this runner creates is an interim form of a broader shared primitive
+(`docs/design/rfcs/0001-agent-job-shared-primitive.md`): one headless run of a composed agent, bound
+to a task, that link-operator's main agent (on a channel event) and panopticon both want to launch.
+To stay forward-compatible, the emitted Job now carries the **OPR-005.3 environment-run identity** —
+labels `link.aioutfitter.com/{organization,project,environment,agent}`, `panopticon.parent-run`,
+`panopticon.task` — and the **OPR-006 typed inputs** as env (`PANOPTICON_INPUT_{TASK_ID,REPO,
+CALLBACK_URL,AGENT}` — trusted identifiers only, never body text). The identity is configured via
+`--k8s-organization/project/environment/agent-slug` (all optional).
+
+The convergence target is link-operator's proposed **`Run` launch CRD** (OPR-006): panopticon
+switches from `kubectl apply` of the Job to `kubectl apply` of a `Run` — the same fields — and the
+operator owns materialization + run-history + concurrency. Until then panopticon creates the Job
+directly (as "an operator on the agent's behalf," which OPR-005 sanctions).
+
 ## Validation
 
 Against link-operator's microVM k3s (its `devenv tasks run cluster:up` + `operator:install`, with

@@ -1,8 +1,10 @@
 # CLAUDE.md — operating manual
 
 Guidance for agents working in this repo. The full design lives under **`docs/design/`**
-(GOALS, PARITY, ARCHITECTURE, ROADMAP, ADRs `docs/design/decisions/`). This file grows one
-slice at a time (see ROADMAP "Definition of done — every slice").
+(GOALS, PARITY, ARCHITECTURE, ROADMAP, ADRs `docs/design/decisions/`, cross-repo RFCs
+`docs/design/rfcs/` — e.g. RFC 0001, the shared "Agent Job" primitive across link-operator /
+Outfitter / panopticon). This file grows one slice at a time (see ROADMAP "Definition of done —
+every slice").
 
 ## The one rule that matters most: the determinism invariant
 

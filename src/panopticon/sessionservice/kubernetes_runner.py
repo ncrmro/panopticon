@@ -79,6 +79,10 @@ class KubernetesRunner(Runner):
         *,
         agent: str,
         namespace: str | None = None,
+        organization: str | None = None,
+        project: str | None = None,
+        environment: str | None = None,
+        agent_slug: str | None = None,
         runner_id: str = "kubernetes",
         image: str = DEFAULT_IMAGE,
         image_pull_policy: str = "IfNotPresent",
@@ -96,6 +100,14 @@ class KubernetesRunner(Runner):
         self._agent = agent
         #: The pre-declared agent namespace (``agent-<name>``); panopticon spawns Jobs into it.
         self._namespace = namespace or f"agent-{agent}"
+        #: OPR-005/006 environment identity (``<organization>/<project>/<environment>``) the Job is a
+        #: run of, and the Dotagents ``agent_slug`` it should run (distinct from the namespace's
+        #: ``agent`` name). Recorded as labels so the Job is a recognizable environment run and is
+        #: forward-compatible with a link-operator ``Run`` reconciler (ADR 0014). Optional today.
+        self._organization = organization
+        self._project = project
+        self._environment = environment
+        self._agent_slug = agent_slug
         self._runner_id = runner_id
         self._image = image
         #: ``imagePullPolicy`` for the pod. Defaults to ``IfNotPresent`` so a **locally-imported**
@@ -123,12 +135,27 @@ class KubernetesRunner(Runner):
 
     def _labels(self, task_id: str) -> dict[str, str]:
         """Labels every Job (and its pod template) carries so the agent/operator can recognize +
-        GC workspace-scoped Jobs (OPR-005.3), and ``kubectl`` selectors can find a task's Job."""
-        return {
+        GC workspace-scoped Jobs (OPR-005.3), and ``kubectl`` selectors can find a task's Job.
+
+        Beyond the panopticon bookkeeping (managed-by, task, parent-run = this runner), the Job
+        carries the OPR-005.3 environment-run identity — organization / project / environment /
+        agent — when configured, so it is a recognizable link-operator environment run and matches
+        what an OPR-006 ``Run`` reconciler would stamp (ADR 0014)."""
+        labels = {
             "app.kubernetes.io/managed-by": "panopticon",
             "link.aioutfitter.com/agent": self._agent,
             "panopticon.task": task_id,
+            "panopticon.parent-run": self._runner_id,
         }
+        # OPR-005.3 identity — only stamp what's configured (all optional today).
+        for key, value in (
+            ("link.aioutfitter.com/organization", self._organization),
+            ("link.aioutfitter.com/project", self._project),
+            ("link.aioutfitter.com/environment", self._environment),
+        ):
+            if value:
+                labels[key] = value
+        return labels
 
     def _job_manifest(
         self, task_id: str, job: str, image: str, env: Mapping[str, str]
@@ -214,6 +241,15 @@ class KubernetesRunner(Runner):
             "PANOPTICON_RUNNER_ID": self._runner_id,
             **self._extra_env,
         }
+        # The OPR-006 typed `inputs` — trusted identifiers only (repo, task-id, callback), never
+        # body text; the agent fetches content itself. Mirrors the `Run.inputs` a link-operator
+        # reconciler would project, so the same payload survives the switch to a `Run` (ADR 0014).
+        env["PANOPTICON_INPUT_TASK_ID"] = task_id
+        env["PANOPTICON_INPUT_CALLBACK_URL"] = self._service_url
+        if git_url:
+            env["PANOPTICON_INPUT_REPO"] = git_url
+        if self._agent_slug:  # the Dotagents agent the headless runtime should run (OPR-006.6)
+            env["PANOPTICON_INPUT_AGENT"] = self._agent_slug
         if git_url:  # the pod clones its own checkout (host-side prepare_workspace is skipped)
             env["PANOPTICON_GIT_URL"] = git_url
         if initial_prompt:

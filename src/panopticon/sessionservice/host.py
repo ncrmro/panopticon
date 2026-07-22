@@ -251,6 +251,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="override the target namespace (default `agent-<k8s-agent>`)",
     )
     parser.add_argument(
+        "--k8s-organization",
+        default=os.environ.get("PANOPTICON_K8S_ORGANIZATION", ""),
+        help="OPR-005/006 environment identity: organization (stamped as a Job label)",
+    )
+    parser.add_argument(
+        "--k8s-project",
+        default=os.environ.get("PANOPTICON_K8S_PROJECT", ""),
+        help="OPR-005/006 environment identity: project (stamped as a Job label)",
+    )
+    parser.add_argument(
+        "--k8s-environment",
+        default=os.environ.get("PANOPTICON_K8S_ENVIRONMENT", ""),
+        help="OPR-005/006 environment identity: environment (stamped as a Job label)",
+    )
+    parser.add_argument(
+        "--k8s-agent-slug",
+        default=os.environ.get("PANOPTICON_K8S_AGENT_SLUG", ""),
+        help="the Dotagents agent slug the headless runtime runs (OPR-006.6), distinct from "
+        "--k8s-agent (the namespace)",
+    )
+    parser.add_argument(
         "--k8s-image",
         default=os.environ.get("PANOPTICON_K8S_IMAGE", DEFAULT_IMAGE),
         help="the panopticon task image the pod runs (reachable in-cluster)",
@@ -298,6 +319,10 @@ def build_runner(args: argparse.Namespace) -> ContainerRunner:
             args.container_service_url,  # the pod's in-cluster callback URL (not the daemon's view)
             agent=args.k8s_agent,
             namespace=args.k8s_namespace or None,
+            organization=args.k8s_organization or None,
+            project=args.k8s_project or None,
+            environment=args.k8s_environment or None,
+            agent_slug=args.k8s_agent_slug or None,
             runner_id=args.runner_id,
             image=args.k8s_image,
             image_pull_policy=args.k8s_image_pull_policy,

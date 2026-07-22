@@ -120,6 +120,54 @@ def test_image_pull_policy_is_configurable() -> None:
     assert container["imagePullPolicy"] == "Always"  # registry-backed image
 
 
+def test_typed_inputs_are_projected_as_env_trusted_identifiers_only() -> None:
+    rec = _Recorder()
+    _runner(rec).spawn("t1", git_url="https://forge/r1.git")
+    container = json.loads(rec.calls[1][2])["spec"]["template"]["spec"]["containers"][0]
+    env = {e["name"]: e["value"] for e in container["env"]}
+    # OPR-006 typed inputs: identifiers + callback, forward-compatible with a `Run` reconciler
+    assert env["PANOPTICON_INPUT_TASK_ID"] == "t1"
+    assert env["PANOPTICON_INPUT_REPO"] == "https://forge/r1.git"
+    assert env["PANOPTICON_INPUT_CALLBACK_URL"] == "http://panopticon.panopticon.svc:8000"
+
+
+def test_environment_identity_is_stamped_as_labels_when_configured() -> None:
+    rec = _Recorder()
+    KubernetesRunner(
+        "http://svc:8000",
+        agent="researcher-ns",
+        organization="acme",
+        project="widgets",
+        environment="engineer",
+        agent_slug="engineer",
+        runner_id="k8s-1",
+        run=rec,
+    ).spawn("t1")
+    manifest = json.loads(rec.calls[1][2])
+    labels = manifest["metadata"]["labels"]
+    # OPR-005.3 environment-run identity (org/project/environment/agent) + parent-run + task
+    assert labels["link.aioutfitter.com/organization"] == "acme"
+    assert labels["link.aioutfitter.com/project"] == "widgets"
+    assert labels["link.aioutfitter.com/environment"] == "engineer"
+    assert labels["link.aioutfitter.com/agent"] == "researcher-ns"
+    assert labels["panopticon.parent-run"] == "k8s-1"
+    assert labels["panopticon.task"] == "t1"
+    # the Dotagents agent the headless runtime should run (OPR-006.6)
+    container = manifest["spec"]["template"]["spec"]["containers"][0]
+    env = {e["name"]: e["value"] for e in container["env"]}
+    assert env["PANOPTICON_INPUT_AGENT"] == "engineer"
+
+
+def test_environment_identity_labels_omitted_when_unset() -> None:
+    rec = _Recorder()
+    _runner(rec).spawn("t1")  # no org/project/environment configured
+    labels = json.loads(rec.calls[1][2])["metadata"]["labels"]
+    assert "link.aioutfitter.com/organization" not in labels
+    assert "link.aioutfitter.com/project" not in labels
+    assert "link.aioutfitter.com/environment" not in labels
+    assert labels["panopticon.parent-run"] == "k8s-1"  # always present
+
+
 def test_spawn_reports_starting_then_awaiting_via_the_progress_callback() -> None:
     phases: list[LifecyclePhase] = []
     _runner(_Recorder()).spawn("t1", progress=phases.append)
