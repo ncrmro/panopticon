@@ -33,10 +33,15 @@ class _FakeRunner:
     then AWAITING), ``is_running`` (for reconcile/down-detection) and ``has_session`` (for heal/
     self-heal) — both configurable."""
 
-    def __init__(self, *, running: bool = True, session: bool = True) -> None:
+    def __init__(
+        self, *, running: bool = True, session: bool = True, host_prepared: bool = True
+    ) -> None:
         self.spawned: list[dict[str, object]] = []
         self._running = running
         self._session = session
+        #: Mirrors a real runner's marker: True = the host preps workspace+image (LocalRunner),
+        #: False = the spawned unit does (KubernetesRunner) so the spawner takes its remote path.
+        self.host_prepared = host_prepared
 
     def spawn(
         self,
@@ -49,6 +54,7 @@ class _FakeRunner:
         initial_prompt: str | None = None,
         turn: str | None = None,
         starting_model: str | None = None,
+        git_url: str | None = None,
         progress: Callable[[LifecyclePhase], None] | None = None,
     ) -> str:
         self.spawned.append(
@@ -61,6 +67,7 @@ class _FakeRunner:
                 "initial_prompt": initial_prompt,
                 "turn": turn,
                 "starting_model": starting_model,
+                "git_url": git_url,
             }
         )
         if progress is not None:  # the real runner reports these two sub-steps
@@ -180,6 +187,35 @@ def test_spawn_one_claims_then_spawns_a_fresh_task() -> None:
     assert runner.spawned[0]["env_file"] == "r1.env"
     assert runner.spawned[0]["image"] is None  # spike has no image layer → runner uses the base
     assert runner.spawned[0]["docker_in_docker"] is False  # no capability → unprivileged
+
+
+def test_remote_runner_skips_host_workspace_and_image_build() -> None:
+    """A ``host_prepared = False`` runner (KubernetesRunner) takes the spawner's remote path: no
+    host clone, no host image build — the pod clones its own ``/workspace`` and uses the agent's
+    image. The repo's forge is handed through as ``git_url`` so the pod can clone it."""
+
+    class _SpyImages(_FakeImageBuilder):
+        def __init__(self) -> None:
+            self.built_base = False
+
+        def build_base_if_missing(self, *, verbose: bool = False) -> bool:
+            self.built_base = True  # would run `docker` on the host — must NOT happen remotely
+            return False
+
+    client, runner, images = _FakeClient(repo=_REPO), _FakeRunner(host_prepared=False), _SpyImages()
+    cid = _spawner(client, runner, images).spawn_one(
+        {"id": "t1", "repo_id": "r1", "workflow": "spike", "state": "ITERATING", "claimed_by": None}
+    )
+
+    assert cid == "panopticon-t1"
+    assert images.built_base is False  # no host-side image build on the remote backend
+    assert runner.spawned[0]["workspace"] is None  # the pod preps its own checkout
+    assert runner.spawned[0]["image"] is None  # the runner's own agent image, not a composed one
+    assert runner.spawned[0]["git_url"] == "https://forge/r1.git"  # for the in-pod clone
+    # PREPARING is still reported (a lifecycle for the dashboard), but BUILDING is skipped
+    reported = [p for _, p, _ in client.phases]
+    assert "building" not in reported
+    assert reported == ["claiming", "preparing", "starting", "awaiting"]
 
 
 def test_spawn_one_passes_initial_prompt_as_env_var() -> None:

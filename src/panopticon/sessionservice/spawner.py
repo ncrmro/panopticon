@@ -28,7 +28,7 @@ from panopticon.core.state import TERMINAL_LABELS
 from panopticon.sessionservice.clones import CloneCache
 from panopticon.sessionservice.executions import WorkflowExecutions
 from panopticon.sessionservice.images import ImageBuilder
-from panopticon.sessionservice.local_runner import LocalRunner
+from panopticon.sessionservice.runner import ContainerRunner
 from panopticon.sessionservice.shell_runner import ShellRunner
 from panopticon.sessionservice.spawn import cleanup_workspace, prepare_workspace
 
@@ -87,7 +87,7 @@ class Spawner:
     def __init__(
         self,
         client: TaskServiceClient,
-        runner: LocalRunner,
+        runner: ContainerRunner,
         *,
         runner_id: str,
         cache: CloneCache,
@@ -206,8 +206,13 @@ class Spawner:
         return workdir
 
     def _spawn_container(self, task: JsonObj, repo: JsonObj) -> str:
-        """The Docker path: clone the per-task workspace, compose base → workflow → repo, and spawn
-        the container (reports ``PREPARING`` → ``BUILDING`` → ``STARTING`` → ``AWAITING``)."""
+        """Spawn the task's container backend. When the runner prepares its own workspace + image
+        (``host_prepared = False`` — the Kubernetes path), skip the host-side clone/build entirely
+        (:meth:`_spawn_remote_container`); otherwise run the local Docker path below (clone the
+        per-task workspace, compose base → workflow → repo, spawn — ``PREPARING`` → ``BUILDING`` →
+        ``STARTING`` → ``AWAITING``)."""
+        if not self._runner.host_prepared:
+            return self._spawn_remote_container(task, repo)
         task_id = task["id"]
         workspace = self._prepare_task_dir(
             task, repo, clone=True
@@ -236,6 +241,26 @@ class Spawner:
             starting_model=task.get(
                 "starting_model"
             ),  # model selection passed to claude --model on first launch
+            progress=lambda phase: self._report(task_id, phase),  # STARTING then AWAITING
+        )
+
+    def _spawn_remote_container(self, task: JsonObj, repo: JsonObj) -> str:
+        """The remote path (``host_prepared = False``, e.g. Kubernetes): no host clone, no host
+        image build — the spawned unit clones its own ``/workspace`` from the repo's git URL and
+        runs the agent's pre-resolved image. We still report ``PREPARING`` (the runner then reports
+        ``STARTING`` → ``AWAITING``) so the dashboard shows a lifecycle. Provisioning (slug → branch)
+        moves in-container for this backend, so the host-side ``Provisioner`` is not run for it."""
+        task_id = task["id"]
+        _log.info("task %s: spawning remote container (workflow=%s)", task_id, task["workflow"])
+        self._report(task_id, LifecyclePhase.PREPARING)
+        return self._runner.spawn(
+            task_id,
+            env_file=repo.get("env_file"),
+            git_url=repo.get("git_url"),  # the pod clones its own checkout from the forge
+            image=None,  # the runner's configured agent image (composed layers don't apply)
+            initial_prompt=task.get("initial_prompt"),
+            turn=task.get("turn"),
+            starting_model=task.get("starting_model"),
             progress=lambda phase: self._report(task_id, phase),  # STARTING then AWAITING
         )
 
@@ -271,7 +296,7 @@ class Spawner:
             progress=lambda phase: self._report(task_id, phase),  # STARTING then AWAITING
         )
 
-    def _runner_for(self, task: JsonObj) -> LocalRunner | ShellRunner:
+    def _runner_for(self, task: JsonObj) -> ContainerRunner | ShellRunner:
         """The runner that owns ``task``'s session — the shell runner for a shell workflow (when one
         is configured), else the Docker runner. Lets the liveness probes (``is_running`` /
         ``has_session``) in :meth:`reconcile`, :meth:`cleanup`, :meth:`startup_reclaim` and
